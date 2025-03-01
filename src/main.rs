@@ -29,9 +29,10 @@ async fn main() -> Result<(), std::io::Error> {
     // Setup npm db
     let npm_registry_path =
         env::var("NPM_ROCKS_DB").expect("NPM_ROCKS_DB env variable should be set");
+    println!("Creating npm rocks db at {}", npm_registry_path);
     let npm_fs_db = NpmRocksDB::new(&npm_registry_path);
 
-    replication_task::spawn_sync_thread(npm_fs_db.clone());
+    // replication_task::spawn_sync_thread(npm_fs_db.clone());
 
     // cors headers
     let mut headers = HeaderMap::new();
