@@ -51,6 +51,7 @@ impl ChangesStream {
         let request = self
             .client
             .request(Method::GET, "https://replicate.npmjs.com/registry/_changes")
+            .header("npm-replication-opt-in", "true")
             .query(&self.params);
         // println!("{:?}", request);
         let res = request.send().await?;
