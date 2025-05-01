@@ -14,6 +14,7 @@ const HEADER_PREFIX: &str = "OTEL_METADATA_";
 // Used environment variables
 // OTEL_METADATA_AUTHORIZATION = otel collector basic auth
 // OTEL_EXPORTER_OTLP_ENDPOINT = http://otel-collector.csbops.io
+// RUST_LOG = debug|info|warn|error (defaults to info)
 fn init_opentelemetry() -> Option<sdktrace::Tracer> {
     let mut headers: HashMap<String, String> = HashMap::new();
     for (key, value) in env::vars()
@@ -72,9 +73,22 @@ fn init_opentelemetry() -> Option<sdktrace::Tracer> {
 }
 
 pub fn setup_tracing() {
+    // Get log level from environment variable, defaulting to INFO
+    let log_level = env::var("RUST_LOG")
+        .unwrap_or_else(|_| "info".to_string())
+        .to_lowercase();
+    
+    let level_filter = match log_level.as_str() {
+        "debug" => LevelFilter::DEBUG,
+        "info" => LevelFilter::INFO,
+        "warn" => LevelFilter::WARN,
+        "error" => LevelFilter::ERROR,
+        _ => LevelFilter::INFO,
+    };
+
     // NOTE: the underlying subscriber MUST be the Registry subscriber
     let subscriber = Registry::default() // provide underlying span data store
-        .with(LevelFilter::INFO); // filter out low-level debug tracing (eg tokio executor)
+        .with(level_filter); // filter based on RUST_LOG environment variable
 
     // Install a new OpenTelemetry trace pipeline
     let tracer_res = init_opentelemetry();
