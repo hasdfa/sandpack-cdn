@@ -62,26 +62,25 @@ async fn get_reply(
             }
 
             Err(err) => {
-                let mut cloned_npm_db = npm_db.clone();
-                let new_pkg_name;
                 match err {
-                    ServerError::PackageVersionNotFound(pkg_name, _) => {
-                        new_pkg_name = pkg_name;
+                    ServerError::PackageVersionNotFound(pkg_name, version) => {
+                        // Package exists but the requested version doesn't match any available versions
+                        // No point in fetching again, just return the error
+                        return Err(ServerError::PackageVersionNotFound(pkg_name, version));
                     }
                     ServerError::PackageNotFound(pkg_name) => {
-                        new_pkg_name = pkg_name;
+                        // Package doesn't exist in local DB, try fetching from npm
+                        if Some(pkg_name.clone()) == last_failed_pkg_name {
+                            // Already tried fetching this package, it likely doesn't exist on npm
+                            return Err(ServerError::PackageNotFound(pkg_name));
+                        }
+                        last_failed_pkg_name = Some(pkg_name.clone());
+                        let mut cloned_npm_db = npm_db.clone();
+                        cloned_npm_db.fetch_missing_pkg(&pkg_name).await?;
                     }
                     err => {
                         return Err(err);
                     }
-                }
-
-                if new_pkg_name.len() > 0 {
-                    if Some(new_pkg_name.clone()) == last_failed_pkg_name {
-                        return Err(ServerError::PackageNotFound(new_pkg_name));
-                    }
-                    last_failed_pkg_name = Some(new_pkg_name.clone());
-                    cloned_npm_db.fetch_missing_pkg(&new_pkg_name).await?;
                 }
             }
         }
