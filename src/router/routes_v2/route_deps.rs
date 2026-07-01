@@ -63,26 +63,31 @@ async fn get_reply(
 
             Err(err) => {
                 let mut cloned_npm_db = npm_db.clone();
-                let new_pkg_name;
-                match err {
-                    ServerError::PackageVersionNotFound(pkg_name, _) => {
-                        new_pkg_name = pkg_name;
-                    }
-                    ServerError::PackageNotFound(pkg_name) => {
-                        new_pkg_name = pkg_name;
-                    }
-                    err => {
+                let new_pkg_name = match &err {
+                    ServerError::PackageVersionNotFound(pkg_name, _) => pkg_name.clone(),
+                    ServerError::PackageNotFound(pkg_name) => pkg_name.clone(),
+                    _ => {
                         return Err(err);
                     }
+                };
+
+                if new_pkg_name.is_empty() {
+                    // Nothing actionable to fetch, surface the real error.
+                    return Err(err);
                 }
 
-                if new_pkg_name.len() > 0 {
-                    if Some(new_pkg_name.clone()) == last_failed_pkg_name {
-                        return Err(ServerError::PackageNotFound(new_pkg_name));
-                    }
-                    last_failed_pkg_name = Some(new_pkg_name.clone());
-                    cloned_npm_db.fetch_missing_pkg(&new_pkg_name).await?;
+                // If we already refreshed this exact package on the previous
+                // iteration and it still doesn't resolve, stop and return the
+                // real error. Previously this always returned PackageNotFound,
+                // which was misleading when the package exists but the
+                // requested version doesn't (e.g. an exact version pin like
+                // @mui/icons-material@9.1.2 that was never published, where the
+                // actual error is PackageVersionNotFound).
+                if Some(&new_pkg_name) == last_failed_pkg_name.as_ref() {
+                    return Err(err);
                 }
+                last_failed_pkg_name = Some(new_pkg_name.clone());
+                cloned_npm_db.fetch_missing_pkg(&new_pkg_name).await?;
             }
         }
     }

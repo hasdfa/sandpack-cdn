@@ -227,3 +227,90 @@ impl DepTreeBuilder {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::npm_replicator::types::document::{
+        MinimalPackageData, MinimalPackageVersionData,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static DB_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_db() -> NpmRocksDB {
+        let id = DB_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "sandpack-deptree-test-{}-{}",
+            std::process::id(),
+            id
+        ));
+        // Start from a clean slate so leftover state can't affect the test.
+        let _ = std::fs::remove_dir_all(&path);
+        NpmRocksDB::new(path.to_str().unwrap())
+    }
+
+    fn pkg_with_version(name: &str, version: &str) -> MinimalPackageData {
+        let mut versions = BTreeMap::new();
+        versions.insert(
+            version.to_string(),
+            MinimalPackageVersionData {
+                tarball: format!("https://example.com/{}-{}.tgz", name, version),
+                dependencies: BTreeMap::new(),
+            },
+        );
+        MinimalPackageData {
+            name: name.to_string(),
+            dist_tags: BTreeMap::new(),
+            versions,
+            last_updated: Some(0),
+        }
+    }
+
+    fn single_request(name: &str, version: &str) -> HashSet<DepRequest> {
+        let mut requests = HashSet::new();
+        requests.insert(
+            DepRequest::from_name_version(name.to_string(), version.to_string()).unwrap(),
+        );
+        requests
+    }
+
+    // Regression test: when a package exists but the requested exact version
+    // was never published (e.g. @mui/icons-material@9.1.2), the resolver must
+    // report PackageVersionNotFound - not PackageNotFound. The deps route
+    // relies on this distinction to surface an accurate error message.
+    #[test]
+    fn missing_exact_version_reports_version_not_found() {
+        let db = temp_db();
+        db.write_package(pkg_with_version("@mui/icons-material", "9.1.1"))
+            .unwrap();
+
+        let mut builder = DepTreeBuilder::new(db);
+        let err = builder
+            .resolve_tree(single_request("@mui/icons-material", "9.1.2"))
+            .unwrap_err();
+
+        match err {
+            ServerError::PackageVersionNotFound(name, _) => {
+                assert_eq!(name, "@mui/icons-material");
+            }
+            other => panic!("expected PackageVersionNotFound, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn existing_exact_version_resolves() {
+        let db = temp_db();
+        db.write_package(pkg_with_version("@mui/material", "9.1.2"))
+            .unwrap();
+
+        let mut builder = DepTreeBuilder::new(db);
+        builder
+            .resolve_tree(single_request("@mui/material", "9.1.2"))
+            .unwrap();
+
+        let resolved = builder.resolutions.get("@mui/material@9").unwrap();
+        assert_eq!(resolved.to_string(), "9.1.2");
+    }
+}
