@@ -234,18 +234,10 @@ mod tests {
     use crate::npm_replicator::types::document::{
         MinimalPackageData, MinimalPackageVersionData,
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    static DB_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-    fn temp_db() -> NpmRocksDB {
-        let id = DB_COUNTER.fetch_add(1, Ordering::SeqCst);
+    fn temp_db(name: &str) -> NpmRocksDB {
         let mut path = std::env::temp_dir();
-        path.push(format!(
-            "sandpack-deptree-test-{}-{}",
-            std::process::id(),
-            id
-        ));
+        path.push(format!("sandpack-deptree-test-{}", name));
         // Start from a clean slate so leftover state can't affect the test.
         let _ = std::fs::remove_dir_all(&path);
         NpmRocksDB::new(path.to_str().unwrap())
@@ -282,7 +274,7 @@ mod tests {
     // relies on this distinction to surface an accurate error message.
     #[test]
     fn missing_exact_version_reports_version_not_found() {
-        let db = temp_db();
+        let db = temp_db("missing-exact-version");
         db.write_package(pkg_with_version("@mui/icons-material", "9.1.1"))
             .unwrap();
 
@@ -301,7 +293,7 @@ mod tests {
 
     #[test]
     fn existing_exact_version_resolves() {
-        let db = temp_db();
+        let db = temp_db("existing-exact-version");
         db.write_package(pkg_with_version("@mui/material", "9.1.2"))
             .unwrap();
 

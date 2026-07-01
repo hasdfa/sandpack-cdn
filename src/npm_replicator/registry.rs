@@ -118,7 +118,7 @@ impl NpmRocksDB {
         }
     }
 
-    pub async fn fetch_missing_pkg(&mut self, pkg_name: &str) -> Result<(), ServerError> {
+    pub async fn fetch_missing_pkg(&self, pkg_name: &str) -> Result<(), ServerError> {
         let mut should_fetch = false;
         match self.get_package(pkg_name) {
             Ok(pkg) => {
