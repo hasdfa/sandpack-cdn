@@ -22,9 +22,14 @@ impl ErrorReply {
     }
 
     pub fn as_reply(&self) -> CustomReply {
-        // ErrorReply is a (u16, String, String) struct: serializing it to
-        // json cannot fail.
-        let mut reply = CustomReply::json(self).expect("ErrorReply serialization is infallible");
+        // Serializing this plain struct cannot fail today, but never panic on
+        // the request path: fall back to a static body just in case.
+        let mut reply = CustomReply::json(self).unwrap_or_else(|_| {
+            CustomReply::raw_json(
+                br#"{"status":500,"message":"Internal error","details":"failed to serialize error reply"}"#
+                    .to_vec(),
+            )
+        });
         reply.set_status(
             StatusCode::from_u16(self.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
         );

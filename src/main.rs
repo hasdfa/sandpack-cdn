@@ -64,11 +64,19 @@ async fn main() -> Result<(), std::io::Error> {
 // Resolves on SIGINT (what fly.toml sends) or SIGTERM; in-flight requests
 // drain before the process exits, fly force-kills stragglers after 5s.
 async fn shutdown_signal() {
-    use tokio::signal::unix::{signal, SignalKind};
-    let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {},
-        _ = sigterm.recv() => {},
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = sigterm.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
     println!("Shutdown signal received, draining connections...");
 }
