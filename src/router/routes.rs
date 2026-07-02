@@ -17,8 +17,8 @@ pub fn routes(
 
     mod_route(npm_db.clone(), pkg_content_fetcher)
         .or(deps_route(npm_db.clone()))
-        .or(npm_sync_status_route(npm_db))
-        .or(health_route())
+        .or(npm_sync_status_route(npm_db.clone()))
+        .or(health_route(npm_db))
         .or(not_found_route())
 }
 
