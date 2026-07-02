@@ -32,11 +32,7 @@ where
 }
 
 pub async fn not_found_handler() -> Result<impl Reply, Rejection> {
-    Ok(
-        ErrorReply::new(404, "Not found".to_string(), "Not found".to_string())
-            .as_reply(300)
-            .unwrap(),
-    )
+    Ok(ErrorReply::new(404, "Not found".to_string(), "Not found".to_string()).as_reply())
 }
 
 pub fn not_found_route() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone
