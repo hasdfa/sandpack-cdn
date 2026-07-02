@@ -12,7 +12,8 @@ use super::routes_v2::route_npm_status::npm_sync_status_route;
 pub fn routes(
     npm_db: NpmRocksDB,
 ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-    // 15 minutes refresh interval and 1 day ttl
+    // Tarball cache: entries idle out after 1 day, refreshed at most every
+    // 7 days (see PackageContentFetcher::new)
     let pkg_content_fetcher = PackageContentFetcher::new();
 
     mod_route(npm_db.clone(), pkg_content_fetcher)
