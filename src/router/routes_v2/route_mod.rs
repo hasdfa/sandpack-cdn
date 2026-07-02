@@ -47,7 +47,20 @@ pub async fn get_mod_reply(
     let (pkg_name, pkg_version) = parse_package_specifier(&decoded_specifier)?;
 
     let content =
-        download_package_content(&pkg_name, &pkg_version, &npm_db, &pkg_content_fetcher).await?;
+        match download_package_content(&pkg_name, &pkg_version, &npm_db, &pkg_content_fetcher)
+            .await
+        {
+            Ok(content) => content,
+            // With replication disabled the manifest may never have been
+            // mirrored; refresh it from npm once and retry, surfacing the
+            // retry's error as-is.
+            Err(ServerError::PackageNotFound(_)) | Err(ServerError::PackageVersionNotFound(_, _)) => {
+                npm_db.fetch_missing_pkg(&pkg_name).await?;
+                download_package_content(&pkg_name, &pkg_version, &npm_db, &pkg_content_fetcher)
+                    .await?
+            }
+            Err(err) => return Err(err),
+        };
 
     create_reply(content).await
 }

@@ -12,17 +12,26 @@ use super::super::custom_reply::CustomReply;
 use super::super::error_reply::ErrorReply;
 use super::super::routes::with_data;
 
+/// Bounds the resolution work a single request can demand.
+const MAX_DEP_REQUESTS: usize = 1000;
+
 fn parse_query(query: String) -> Result<HashSet<DepRequest>, ServerError> {
     let parts = query.split(';');
     let mut dep_requests: HashSet<DepRequest> = HashSet::new();
     for part in parts {
         let (name, version) = parse_package_specifier_no_validation(part)?;
+        if name.is_empty() {
+            return Err(ServerError::InvalidPackageSpecifier);
+        }
         let versions = version.split(',');
         for version in versions {
             dep_requests.insert(DepRequest::from_name_version(
                 name.clone(),
                 version.to_string(),
             )?);
+            if dep_requests.len() > MAX_DEP_REQUESTS {
+                return Err(ServerError::InvalidQuery);
+            }
         }
     }
     Ok(dep_requests)
@@ -190,5 +199,35 @@ mod tests {
             pkg_to_fetch(&ServerError::PackageNotFound(String::new()), &fetched(&[])),
             None
         );
+    }
+
+    #[test]
+    fn parse_query_accepts_multi_dep_queries() {
+        let requests = parse_query("react@^18.0.0;vue@3.0.0,2.7.0".to_string()).unwrap();
+        assert_eq!(requests.len(), 3);
+    }
+
+    #[test]
+    fn parse_query_rejects_empty_names() {
+        assert!(matches!(
+            parse_query("@1.0.0".to_string()),
+            Err(ServerError::InvalidPackageSpecifier)
+        ));
+        assert!(matches!(
+            parse_query("".to_string()),
+            Err(ServerError::InvalidPackageSpecifier)
+        ));
+    }
+
+    #[test]
+    fn parse_query_caps_request_count() {
+        let query = (0..=MAX_DEP_REQUESTS)
+            .map(|idx| format!("pkg-{}@1.0.0", idx))
+            .collect::<Vec<_>>()
+            .join(";");
+        assert!(matches!(
+            parse_query(query),
+            Err(ServerError::InvalidQuery)
+        ));
     }
 }
