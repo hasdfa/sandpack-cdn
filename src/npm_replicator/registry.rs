@@ -15,30 +15,32 @@ use super::types::document::MinimalPackageData;
 #[derive(Clone, Debug)]
 pub struct NpmRocksDB {
     pub db_path: PathBuf,
-    db: Arc<Mutex<DB>>,
+    // RocksDB handles its own synchronization; no mutex needed, so reads
+    // from concurrent requests don't serialize on a single lock.
+    db: Arc<DB>,
     cache: Arc<Mutex<LruCache<String, Arc<MinimalPackageData>>>>,
 }
 
 impl NpmRocksDB {
     pub fn new(db_path: &str) -> Self {
-        let db = DB::open_default(db_path).unwrap();
+        let db = DB::open_default(db_path).expect("failed to open rocksdb database");
         let cache = LruCache::new(NonZeroUsize::new(500).unwrap());
 
         Self {
             db_path: PathBuf::from(db_path),
-            db: Arc::new(Mutex::new(db)),
+            db: Arc::new(db),
             cache: Arc::new(Mutex::new(cache)),
         }
     }
 
     #[tracing::instrument(name = "npm_db_get_last_seq", level = "debug", skip(self))]
     pub fn get_last_seq(&self) -> AppResult<i64> {
-        if let Some(result) = self.db.lock().get(b"#CDN_LAST_SYNC").unwrap() {
-            Ok(i64::from_le_bytes(
-                result[..]
-                    .try_into()
-                    .expect("last sync invalid byte length"),
-            ))
+        if let Some(result) = self.db.get(b"#CDN_LAST_SYNC")? {
+            Ok(i64::from_le_bytes(result[..].try_into().map_err(|_| {
+                ServerError::UnexpectedError {
+                    message: "corrupt #CDN_LAST_SYNC value".to_string(),
+                }
+            })?))
         } else {
             Ok(0)
         }
@@ -46,16 +48,13 @@ impl NpmRocksDB {
 
     #[tracing::instrument(name = "npm_db_update_last_seq", level = "debug", skip(self))]
     pub fn update_last_seq(&self, next_seq: i64) -> AppResult<usize> {
-        self.db
-            .lock()
-            .put(b"#CDN_LAST_SYNC", next_seq.to_le_bytes())
-            .unwrap();
+        self.db.put(b"#CDN_LAST_SYNC", next_seq.to_le_bytes())?;
         Ok(1)
     }
 
     #[tracing::instrument(name = "npm_db_delete_package", level = "debug", skip(self))]
     pub fn delete_package(&self, pkg_name: &str) -> AppResult<usize> {
-        self.db.lock().delete(pkg_name.as_bytes()).unwrap();
+        self.db.delete(pkg_name.as_bytes())?;
         Ok(1)
     }
 
@@ -69,9 +68,7 @@ impl NpmRocksDB {
         let pkg_name = pkg.name.clone();
         let content = serialize_msgpack(&pkg)?;
 
-        {
-            self.db.lock().put(pkg_name.as_bytes(), content).unwrap();
-        }
+        self.db.put(pkg_name.as_bytes(), content)?;
 
         {
             let mut cache = self.cache.lock();
@@ -94,7 +91,7 @@ impl NpmRocksDB {
 
         let content_val: Option<Vec<u8>> = {
             let span = tracing::span!(tracing::Level::DEBUG, "db_get_pkg").entered();
-            let result = self.db.lock().get(pkg_name.as_bytes()).unwrap();
+            let result = self.db.get(pkg_name.as_bytes())?;
             span.exit();
             result
         };
@@ -127,7 +124,9 @@ impl NpmRocksDB {
                 } else {
                     let last_updated = pkg.last_updated.unwrap();
                     let now = secs_since_epoch();
-                    let diff = now - last_updated;
+                    // saturating: a future last_updated (clock skew) must not
+                    // underflow-panic, it just counts as fresh.
+                    let diff = now.saturating_sub(last_updated);
                     if diff > 60 {
                         should_fetch = true;
                     }

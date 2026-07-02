@@ -65,6 +65,8 @@ pub enum ServerError {
     UnexpectedError { message: String },
     #[error("MessagePack Decode Error")]
     MessagePackDecodeError(#[from] rmp_serde::decode::Error),
+    #[error("RocksDB error")]
+    RocksDBError(#[from] rocksdb::Error),
 }
 
 impl ServerError {
