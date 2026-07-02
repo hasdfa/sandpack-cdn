@@ -117,12 +117,6 @@ impl DepTreeBuilder {
         if let Some(versions) = self.packages.get(&String::from(name)) {
             for version in versions {
                 if range.satisfies(version) {
-                    // TODO: Make this only run for dev builds, it slows down requests a lot sometimes...
-                    // println!(
-                    //     "{}@{} is already resolved, skipping",
-                    //     &request.name, &request.range
-                    // );
-
                     return true;
                 }
             }
@@ -167,14 +161,26 @@ impl DepTreeBuilder {
             return Ok(transient_deps);
         }
 
-        let mut highest_version: Option<Version> = None;
-        for (version, _data) in data.versions.iter().rev() {
-            let parsed_version = Version::parse(version)?;
-            if range.satisfies(&parsed_version) {
-                highest_version = Some(parsed_version);
-                break;
-            }
-        }
+        // The versions map is keyed by string, so its order is lexicographic
+        // ("1.9.0" > "1.10.0", "9.0.0" > "10.0.0"); pick the semver-maximum
+        // matching version instead of trusting that order. Malformed version
+        // keys are skipped rather than failing the whole resolution.
+        let highest_version: Option<Version> = data
+            .versions
+            .keys()
+            .filter_map(|version| match Version::parse(version) {
+                Ok(parsed) => Some(parsed),
+                Err(_) => {
+                    tracing::warn!(
+                        "Skipping malformed version '{}' of package {}",
+                        version,
+                        request.name
+                    );
+                    None
+                }
+            })
+            .filter(|parsed| range.satisfies(parsed))
+            .max();
 
         if let Some(resolved_version) = highest_version {
             self.add_dependency(&request.name, &resolved_version);
@@ -243,21 +249,27 @@ mod tests {
         NpmRocksDB::new(path.to_str().unwrap())
     }
 
-    fn pkg_with_version(name: &str, version: &str) -> MinimalPackageData {
+    fn pkg_with_versions(name: &str, version_strs: &[&str]) -> MinimalPackageData {
         let mut versions = BTreeMap::new();
-        versions.insert(
-            version.to_string(),
-            MinimalPackageVersionData {
-                tarball: format!("https://example.com/{}-{}.tgz", name, version),
-                dependencies: BTreeMap::new(),
-            },
-        );
+        for version in version_strs {
+            versions.insert(
+                version.to_string(),
+                MinimalPackageVersionData {
+                    tarball: format!("https://example.com/{}-{}.tgz", name, version),
+                    dependencies: BTreeMap::new(),
+                },
+            );
+        }
         MinimalPackageData {
             name: name.to_string(),
             dist_tags: BTreeMap::new(),
             versions,
             last_updated: Some(0),
         }
+    }
+
+    fn pkg_with_version(name: &str, version: &str) -> MinimalPackageData {
+        pkg_with_versions(name, &[version])
     }
 
     fn single_request(name: &str, version: &str) -> HashSet<DepRequest> {
@@ -304,5 +316,73 @@ mod tests {
 
         let resolved = builder.resolutions.get("@mui/material@9").unwrap();
         assert_eq!(resolved.to_string(), "9.1.2");
+    }
+
+    // "1.10.0" < "1.9.0" lexicographically; the resolver must still pick
+    // the semver-highest match.
+    #[test]
+    fn caret_range_resolves_semver_max() {
+        let db = temp_db("caret-semver-max");
+        db.write_package(pkg_with_versions("pkg", &["1.9.0", "1.10.0"]))
+            .unwrap();
+
+        let mut builder = DepTreeBuilder::new(db);
+        builder.resolve_tree(single_request("pkg", "^1.0.0")).unwrap();
+
+        assert_eq!(builder.resolutions.get("pkg@1").unwrap().to_string(), "1.10.0");
+    }
+
+    // "9.0.0" > "10.0.0" lexicographically; a wildcard must still pick 10.x.
+    #[test]
+    fn star_range_resolves_semver_max() {
+        let db = temp_db("star-semver-max");
+        db.write_package(pkg_with_versions("pkg", &["9.0.0", "10.0.0"]))
+            .unwrap();
+
+        let mut builder = DepTreeBuilder::new(db);
+        builder.resolve_tree(single_request("pkg", "*")).unwrap();
+
+        assert_eq!(builder.resolutions.get("pkg@10").unwrap().to_string(), "10.0.0");
+    }
+
+    #[test]
+    fn malformed_version_key_is_skipped() {
+        let db = temp_db("malformed-version");
+        db.write_package(pkg_with_versions("pkg", &["not-semver", "1.2.3"]))
+            .unwrap();
+
+        let mut builder = DepTreeBuilder::new(db);
+        builder.resolve_tree(single_request("pkg", "^1.0.0")).unwrap();
+
+        assert_eq!(builder.resolutions.get("pkg@1").unwrap().to_string(), "1.2.3");
+    }
+
+    #[test]
+    fn dist_tag_resolves_and_aliases() {
+        let db = temp_db("dist-tag");
+        let mut pkg = pkg_with_versions("pkg", &["1.9.0", "1.10.0"]);
+        pkg.dist_tags
+            .insert("latest".to_string(), "1.10.0".to_string());
+        db.write_package(pkg).unwrap();
+
+        let mut builder = DepTreeBuilder::new(db);
+        builder.resolve_tree(single_request("pkg", "latest")).unwrap();
+
+        assert_eq!(builder.resolutions.get("pkg@1").unwrap().to_string(), "1.10.0");
+        assert_eq!(builder.aliases.get("pkg@latest").unwrap(), "pkg@1");
+    }
+
+    #[test]
+    fn dep_range_parse_classifies() {
+        assert_eq!(DepRange::parse("".to_string()), DepRange::Range(Range::any()));
+        assert_eq!(DepRange::parse("*".to_string()), DepRange::Range(Range::any()));
+        assert!(matches!(
+            DepRange::parse("^1.2.3".to_string()),
+            DepRange::Range(_)
+        ));
+        assert_eq!(
+            DepRange::parse("latest".to_string()),
+            DepRange::Tag("latest".to_string())
+        );
     }
 }
