@@ -12,13 +12,14 @@ use super::routes_v2::route_npm_status::npm_sync_status_route;
 pub fn routes(
     npm_db: NpmRocksDB,
 ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-    // 15 minutes refresh interval and 1 day ttl
+    // Tarball cache: entries idle out after 1 day, refreshed at most every
+    // 7 days (see PackageContentFetcher::new)
     let pkg_content_fetcher = PackageContentFetcher::new();
 
     mod_route(npm_db.clone(), pkg_content_fetcher)
         .or(deps_route(npm_db.clone()))
-        .or(npm_sync_status_route(npm_db))
-        .or(health_route())
+        .or(npm_sync_status_route(npm_db.clone()))
+        .or(health_route(npm_db))
         .or(not_found_route())
 }
 
@@ -32,11 +33,7 @@ where
 }
 
 pub async fn not_found_handler() -> Result<impl Reply, Rejection> {
-    Ok(
-        ErrorReply::new(404, "Not found".to_string(), "Not found".to_string())
-            .as_reply(300)
-            .unwrap(),
-    )
+    Ok(ErrorReply::new(404, "Not found".to_string(), "Not found".to_string()).as_reply())
 }
 
 pub fn not_found_route() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone

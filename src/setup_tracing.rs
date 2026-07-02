@@ -1,7 +1,6 @@
 use opentelemetry::sdk::{trace as sdktrace, Resource};
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_semantic_conventions;
 use std::collections::HashMap;
 use std::env;
 use tracing_subscriber::filter::LevelFilter;

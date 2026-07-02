@@ -1,4 +1,4 @@
-use crate::npm_replicator::{registry::NpmRocksDB, replication_task};
+use crate::npm_replicator::registry::NpmRocksDB;
 use dotenv::dotenv;
 use std::env;
 use std::net::SocketAddr;
@@ -32,7 +32,7 @@ async fn main() -> Result<(), std::io::Error> {
     println!("Creating npm rocks db at {}", npm_registry_path);
     let npm_fs_db = NpmRocksDB::new(&npm_registry_path);
 
-    // replication_task::spawn_sync_thread(npm_fs_db.clone());
+    // npm_replicator::replication_task::spawn_sync_thread(npm_fs_db.clone());
 
     // cors headers
     let mut headers = HeaderMap::new();
@@ -53,8 +53,30 @@ async fn main() -> Result<(), std::io::Error> {
         .with(warp::compression::gzip());
 
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
-    println!("Server running on {}", addr);
-    warp::serve(filter).run(addr).await;
+    let (bound_addr, server) =
+        warp::serve(filter).bind_with_graceful_shutdown(addr, shutdown_signal());
+    println!("Server running on {}", bound_addr);
+    server.await;
 
     Ok(())
+}
+
+// Resolves on SIGINT (what fly.toml sends) or SIGTERM; in-flight requests
+// drain before the process exits, fly force-kills stragglers after 5s.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = sigterm.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+    println!("Shutdown signal received, draining connections...");
 }

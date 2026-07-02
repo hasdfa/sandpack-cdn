@@ -12,20 +12,45 @@ use super::super::custom_reply::CustomReply;
 use super::super::error_reply::ErrorReply;
 use super::super::routes::with_data;
 
+/// Bounds the resolution work a single request can demand.
+const MAX_DEP_REQUESTS: usize = 1000;
+
 fn parse_query(query: String) -> Result<HashSet<DepRequest>, ServerError> {
     let parts = query.split(';');
     let mut dep_requests: HashSet<DepRequest> = HashSet::new();
     for part in parts {
         let (name, version) = parse_package_specifier_no_validation(part)?;
+        if name.is_empty() {
+            return Err(ServerError::InvalidPackageSpecifier);
+        }
         let versions = version.split(',');
         for version in versions {
             dep_requests.insert(DepRequest::from_name_version(
                 name.clone(),
                 version.to_string(),
             )?);
+            if dep_requests.len() > MAX_DEP_REQUESTS {
+                return Err(ServerError::InvalidQuery);
+            }
         }
     }
     Ok(dep_requests)
+}
+
+/// A resolution failure is retried by refreshing the offending package from
+/// npm, but each package is only fetched once per request. Returns the package
+/// to fetch, or None when the error should be surfaced to the client as-is
+/// (e.g. a version that was never published stays PackageVersionNotFound).
+fn pkg_to_fetch(err: &ServerError, already_fetched: &HashSet<String>) -> Option<String> {
+    let pkg_name = match err {
+        ServerError::PackageVersionNotFound(pkg_name, _) => pkg_name,
+        ServerError::PackageNotFound(pkg_name) => pkg_name,
+        _ => return None,
+    };
+    if pkg_name.is_empty() || already_fetched.contains(pkg_name) {
+        return None;
+    }
+    Some(pkg_name.clone())
 }
 
 async fn get_reply(
@@ -37,7 +62,8 @@ async fn get_reply(
     let dep_requests = parse_query(decoded_query)?;
 
     let mut res_map: Option<ResolutionsMap> = None;
-    let mut last_failed_pkg_name: Option<String> = None;
+    let mut fetched_pkgs: HashSet<String> = HashSet::new();
+    let mut last_err: Option<ServerError> = None;
     for _idx in 0..100 {
         let cloned_dep_requests = dep_requests.clone();
         let cloned_npm_db = npm_db.clone();
@@ -62,35 +88,20 @@ async fn get_reply(
             }
 
             Err(err) => {
-                let mut cloned_npm_db = npm_db.clone();
-                let new_pkg_name;
-                match err {
-                    ServerError::PackageVersionNotFound(pkg_name, _) => {
-                        new_pkg_name = pkg_name;
-                    }
-                    ServerError::PackageNotFound(pkg_name) => {
-                        new_pkg_name = pkg_name;
-                    }
-                    err => {
-                        return Err(err);
-                    }
-                }
-
-                if new_pkg_name.len() > 0 {
-                    if Some(new_pkg_name.clone()) == last_failed_pkg_name {
-                        return Err(ServerError::PackageNotFound(new_pkg_name));
-                    }
-                    last_failed_pkg_name = Some(new_pkg_name.clone());
-                    cloned_npm_db.fetch_missing_pkg(&new_pkg_name).await?;
-                }
+                let pkg_name = match pkg_to_fetch(&err, &fetched_pkgs) {
+                    Some(pkg_name) => pkg_name,
+                    None => return Err(err),
+                };
+                npm_db.fetch_missing_pkg(&pkg_name).await?;
+                fetched_pkgs.insert(pkg_name);
+                last_err = Some(err);
             }
         }
     }
 
-    if res_map == None {
-        return Err(ServerError::PackageNotFound(
-            last_failed_pkg_name.unwrap_or("unknown".to_string()),
-        ));
+    if res_map.is_none() {
+        // The retry loop was exhausted, surface the last resolution error.
+        return Err(last_err.unwrap_or(ServerError::PackageNotFound("unknown".to_string())));
     }
 
     let mut reply = match is_json {
@@ -116,7 +127,7 @@ async fn deps_route_handler(
 ) -> Result<impl Reply, Rejection> {
     match get_reply(path, npm_db, is_json).await {
         Ok(reply) => Ok(reply),
-        Err(err) => Ok(ErrorReply::from(err).as_reply(300).unwrap()),
+        Err(err) => Ok(ErrorReply::from(err).as_reply()),
     }
 }
 
@@ -144,4 +155,79 @@ pub fn deps_route(
     npm_db: NpmRocksDB,
 ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
     json_route(npm_db.clone()).or(msgpack_route(npm_db))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fetched(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    // Regression test: a package whose requested version was never published
+    // (e.g. @mui/icons-material@9.1.2) is refreshed from npm once, and when
+    // that doesn't help the original PackageVersionNotFound error must be
+    // surfaced instead of being masked as PackageNotFound.
+    #[test]
+    fn missing_version_is_fetched_once_then_surfaced() {
+        let err = ServerError::PackageVersionNotFound(
+            "@mui/icons-material".to_string(),
+            "9.1.2".to_string(),
+        );
+        assert_eq!(
+            pkg_to_fetch(&err, &fetched(&[])),
+            Some("@mui/icons-material".to_string())
+        );
+        assert_eq!(pkg_to_fetch(&err, &fetched(&["@mui/icons-material"])), None);
+    }
+
+    #[test]
+    fn missing_package_is_fetched_once_then_surfaced() {
+        let err = ServerError::PackageNotFound("left-pad".to_string());
+        assert_eq!(pkg_to_fetch(&err, &fetched(&[])), Some("left-pad".to_string()));
+        assert_eq!(pkg_to_fetch(&err, &fetched(&["left-pad"])), None);
+    }
+
+    #[test]
+    fn other_errors_are_not_retried() {
+        assert_eq!(
+            pkg_to_fetch(&ServerError::InvalidPackageSpecifier, &fetched(&[])),
+            None
+        );
+        assert_eq!(
+            pkg_to_fetch(&ServerError::PackageNotFound(String::new()), &fetched(&[])),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_query_accepts_multi_dep_queries() {
+        let requests = parse_query("react@^18.0.0;vue@3.0.0,2.7.0".to_string()).unwrap();
+        assert_eq!(requests.len(), 3);
+    }
+
+    #[test]
+    fn parse_query_rejects_empty_names() {
+        assert!(matches!(
+            parse_query("@1.0.0".to_string()),
+            Err(ServerError::InvalidPackageSpecifier)
+        ));
+        assert!(matches!(
+            parse_query("".to_string()),
+            Err(ServerError::InvalidPackageSpecifier)
+        ));
+    }
+
+    #[test]
+    fn parse_query_caps_request_count() {
+        let query = (0..=MAX_DEP_REQUESTS)
+            .map(|idx| format!("pkg-{}@1.0.0", idx))
+            .collect::<Vec<_>>()
+            .join(";");
+        assert!(matches!(
+            parse_query(query),
+            Err(ServerError::InvalidQuery)
+        ));
+    }
 }

@@ -1,12 +1,12 @@
 use std::io::{Cursor, Read};
 use std::{fmt, sync::Arc, time::Duration};
 
+use crate::npm::http_client::get_client;
 use crate::{app_error::ServerError, cached::Cached, npm_replicator::registry::NpmRocksDB};
 use ::tar::{Archive, EntryType};
 use flate2::read::GzDecoder;
 use moka::future::Cache;
-use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
-use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
+use reqwest_middleware::ClientWithMiddleware;
 use std::collections::HashMap;
 
 pub type ByteVec = Vec<u8>;
@@ -84,23 +84,6 @@ async fn get_tarball(
         .await?;
 
     Ok(res)
-}
-
-fn get_client() -> ClientWithMiddleware {
-    let retry_policy = ExponentialBackoff::builder().build_with_max_retries(3);
-
-    let client_builder = reqwest::ClientBuilder::new()
-        .timeout(Duration::from_secs(120))
-        .deflate(true)
-        .gzip(true)
-        .brotli(true);
-    let base_client = client_builder
-        .build()
-        .expect("reqwest::ClientBuilder::build()");
-
-    ClientBuilder::new(base_client)
-        .with(RetryTransientMiddleware::new_with_policy(retry_policy))
-        .build()
 }
 
 #[derive(Clone)]
